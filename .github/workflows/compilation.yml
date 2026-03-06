@@ -19,21 +19,25 @@ jobs:
         with:
           submodules: recursive
 
-      # 2. Installa la toolchain PSPDEV (compilatore per PSP)
-      - name: 🔧 Setup PSPDEV toolchain
-        uses: pspdev/setup-pspdev@v1
-
-      # 3. Installa dipendenze di sistema
-      - name: 📦 Installa dipendenze
+      # 2. Installa PSPDEV usando i binari precompilati ufficiali
+      - name: 🔧 Installa PSPDEV toolchain
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            cmake \
-            ninja-build \
-            python3 \
-            git
+            cmake ninja-build python3 git \
+            build-essential wget
 
-      # 4. Configura il progetto con CMake per PSP
+          export PSPDEV=/usr/local/pspdev
+          echo "PSPDEV=$PSPDEV" >> $GITHUB_ENV
+          echo "$PSPDEV/bin" >> $GITHUB_PATH
+
+          wget -q https://github.com/pspdev/pspdev/releases/latest/download/pspdev-ubuntu-latest-x86_64.tar.gz
+          sudo tar -xzf pspdev-ubuntu-latest-x86_64.tar.gz -C /usr/local/
+
+          echo "✅ PSPDEV installato"
+          psp-gcc --version
+
+      # 3. Configura il progetto con CMake per PSP
       - name: ⚙️ Configura CMake per PSP
         run: |
           mkdir -p build_psp
