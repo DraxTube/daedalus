@@ -8,128 +8,125 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-psp:
-    name: Build per PSP
+  # ─── Build per PSP 2000/3000 (64MB RAM) ───
+  build-psp-slim:
+    name: Build PSP 2000/3000 (64MB)
     runs-on: ubuntu-latest
 
     steps:
-      # 1. Checkout SENZA submodules (SaveStates è rotto nel repo originale)
       - name: 📥 Checkout sorgente
         uses: actions/checkout@v4
         with:
           submodules: false
 
-      # 2. Installa PSPDEV con Docker (metodo più affidabile)
+      - name: 🩹 Fix submodules rotti
+        run: |
+          if [ -f .gitmodules ]; then
+            python3 -c "
+          import re
+          with open('.gitmodules', 'r') as f:
+              content = f.read()
+          content = re.sub(r'\[submodule \"SaveStates\"\][^\[]*', '', content, flags=re.DOTALL)
+          with open('.gitmodules', 'w') as f:
+              f.write(content)
+          "
+          fi
+          git submodule sync 2>/dev/null || true
+          git submodule update --init --depth=1 2>/dev/null || true
+
       - name: 🔧 Installa PSPDEV toolchain
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y cmake ninja-build python3 git build-essential wget curl
+          sudo apt-get install -y cmake ninja-build python3 git build-essential wget
 
-          # Scarica il tar.gz ufficiale da pspdev
-          PSPDEV_URL="https://github.com/pspdev/pspdev/releases/latest/download/pspdev-ubuntu-latest-x86_64.tar.gz"
-          echo "Scaricando PSPDEV da: $PSPDEV_URL"
-          wget -q --show-progress "$PSPDEV_URL" -O /tmp/pspdev.tar.gz
-
-          # Estrai e vedi dove va a finire
-          sudo mkdir -p /usr/local/pspdev
+          wget -q https://github.com/pspdev/pspdev/releases/latest/download/pspdev-ubuntu-latest-x86_64.tar.gz -O /tmp/pspdev.tar.gz
           sudo tar -xzf /tmp/pspdev.tar.gz -C /usr/local/
-          
-          # Trova dove sono i binari
-          echo "=== Struttura estratta ==="
-          find /usr/local -name "psp-gcc" 2>/dev/null || echo "psp-gcc non trovato in /usr/local"
-          find /opt -name "psp-gcc" 2>/dev/null || echo "psp-gcc non trovato in /opt"
-          find /home -name "psp-gcc" 2>/dev/null || echo "psp-gcc non trovato in /home"
-          
-          # Cerca in tutto il filesystem
+
           PSPGCC=$(find / -name "psp-gcc" -type f 2>/dev/null | head -1)
-          if [ -z "$PSPGCC" ]; then
-            echo "❌ psp-gcc non trovato! Contenuto del tar:"
-            tar -tzf /tmp/pspdev.tar.gz | head -30
-            exit 1
-          fi
-          
           PSPDEV_BIN=$(dirname "$PSPGCC")
           PSPDEV_ROOT=$(dirname "$PSPDEV_BIN")
-          echo "✅ PSPDEV trovato in: $PSPDEV_ROOT"
-          echo "   Binari in: $PSPDEV_BIN"
-          
-          # Salva il path per i prossimi step
+
           echo "PSPDEV=$PSPDEV_ROOT" >> $GITHUB_ENV
           echo "$PSPDEV_BIN" >> $GITHUB_PATH
-          
-          # Verifica
           export PATH="$PSPDEV_BIN:$PATH"
           psp-gcc --version
 
-      # 3. Configura CMake per PSP
-      - name: ⚙️ Configura CMake per PSP
+      - name: ⚙️ Configura CMake — PSP 2000/3000 64MB
         run: |
-          echo "PSPDEV = $PSPDEV"
-          echo "PATH = $PATH"
-          which psp-gcc || echo "psp-gcc non in PATH!"
-          
-          # Cerca il toolchain file
           TOOLCHAIN=$(find $PSPDEV -name "pspdev.cmake" 2>/dev/null | head -1)
-          if [ -z "$TOOLCHAIN" ]; then
-            echo "⚠️ pspdev.cmake non trovato, cerco alternative..."
-            find $PSPDEV -name "*.cmake" 2>/dev/null
-            # Usa il toolchain di psp-cmake se disponibile
-            TOOLCHAIN=$(find $PSPDEV -name "*.cmake" | head -1)
-          fi
-          echo "Usando toolchain: $TOOLCHAIN"
-          
-          mkdir -p build_psp
-          cd build_psp
+          [ -z "$TOOLCHAIN" ] && TOOLCHAIN=$(find $PSPDEV -name "*.cmake" | head -1)
+          echo "Toolchain: $TOOLCHAIN"
+
+          mkdir -p build_slim
+          cd build_slim
           cmake .. \
             -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN" \
             -DCMAKE_BUILD_TYPE=Release \
             -DTARGET_PSP=ON \
-            -G Ninja
+            -DPSP_LARGE_MEMORY=ON \
+            -G Ninja \
+            -DCMAKE_C_FLAGS="-O2 -G0 -DPSP_SLIM" \
+            -DCMAKE_CXX_FLAGS="-O2 -G0 -DPSP_SLIM"
 
-      # 4. Compila
       - name: 🔨 Compila
         run: |
-          cd build_psp
+          cd build_slim
           ninja -j$(nproc)
 
-      # 5. Pacchetta
-      - name: 📦 Pacchetta EBOOT.PBP
+      - name: 📦 Pacchetta — PSP 2000/3000
         run: |
-          mkdir -p artifact
-          find build_psp -name "EBOOT.PBP" -exec cp {} artifact/ \; || true
-          find build_psp -name "*.prx" -exec cp {} artifact/ \; || true
-          cp -r Data artifact/ 2>/dev/null || true
-          echo "=== Contenuto artifact ==="
-          ls -lah artifact/
+          mkdir -p artifact_slim
+          find build_slim -name "EBOOT.PBP" -exec cp {} artifact_slim/ \; || true
+          find build_slim -name "*.prx" -exec cp {} artifact_slim/ \; || true
+          cp -r Data artifact_slim/ 2>/dev/null || true
 
-      # 6. Upload artifact
-      - name: ⬆️ Upload artifact
+          # Crea README per ricordare che è solo per Slim
+          cat > artifact_slim/LEGGIMI.txt << 'EOF'
+          ╔══════════════════════════════════════╗
+          ║   DaedalusX64 — PSP 2000 / 3000     ║
+          ║   NON funziona su PSP 1000 (Fat)    ║
+          ╚══════════════════════════════════════╝
+
+          INSTALLAZIONE:
+          1. Copia EBOOT.PBP in: PSP/GAME/DaedalusX64/
+          2. Copia la cartella Data/ nella stessa directory
+          3. Metti le ROM .z64/.n64/.v64 in: PSP/GAME/DaedalusX64/Data/Roms/
+          4. Avvia dalla XMB
+
+          CFW supportati: ARK, PRO-C, LME, Infinity
+          EOF
+
+          echo "=== Contenuto artifact ==="
+          ls -lah artifact_slim/
+
+      - name: ⬆️ Upload artifact PSP Slim
         uses: actions/upload-artifact@v4
         with:
-          name: DaedalusX64-PSP-${{ github.sha }}
-          path: artifact/
+          name: DaedalusX64-PSP-Slim-${{ github.sha }}
+          path: artifact_slim/
           retention-days: 30
 
-      # 7. Release automatica su push master
-      - name: 🚀 Crea Release automatica
+      - name: 🚀 Release automatica
         if: github.ref == 'refs/heads/master' && github.event_name == 'push'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}
-          name: "Build #${{ github.run_number }}"
+          name: "Build #${{ github.run_number }} — PSP 2000/3000"
           body: |
-            ## 🎮 DaedalusX64 PSP - Build Automatica
+            ## 🎮 DaedalusX64 PSP — Build per PSP 2000 / 3000
 
-            **Commit:** ${{ github.sha }}
+            ⚠️ **Richiede PSP 2000 o superiore** (64MB RAM)
+            ✅ Testato con CFW ARK, PRO-C, LME, Infinity
 
-            ### Come installare:
+            ### Installazione:
             1. Copia `EBOOT.PBP` in `PSP/GAME/DaedalusX64/`
             2. Copia la cartella `Data/` nella stessa directory
-            3. Avvia dalla XMB della PSP
+            3. ROM in `PSP/GAME/DaedalusX64/Data/Roms/`
+            4. Avvia dalla XMB
 
-            ### Cambiamenti:
-            ${{ github.event.head_commit.message }}
-          files: artifact/*
+            **Commit:** ${{ github.sha }}
+            **Cambiamenti:** ${{ github.event.head_commit.message }}
+          files: artifact_slim/*
           draft: false
           prerelease: true
         env:
