@@ -1,189 +1,97 @@
-name: CI
+name: 🎮 Build DaedalusX64 PSP
 
 on:
   push:
+    branches: [ master, main, dev ]
   pull_request:
-  repository_dispatch:
-    types: [run_build]
+    branches: [ master, main ]
+  workflow_dispatch:  # permette di avviare manualmente dalla UI di GitHub
 
 jobs:
   build-psp:
-    name: PSP Build
+    name: Build per PSP
     runs-on: ubuntu-latest
-    container: pspdev/pspdev:latest
-    
-    steps:
-    - uses: actions/checkout@v4
-
-    - name: Install dependencies
-      run: |
-        apk add build-base git bash cmake
-    
-    - name: Compile project
-      run: |
-        ./build_daedalus.sh PSP
-
-    - name: Get short SHA
-      id: slug
-      run: echo "{name}={sha8::$(echo ${GITHUB_S9A} | cut -c1-8)}" >> $GITHUB_OUTPUT
-
-    - name: Prepare Artifacts
-      run: |
-        rm -rf DaedalusX64/daedalus.prx # Remove the PRX used for testing in public builds
-
-    - name: Upload artifacts
-      if: ${{ success() }}
-      uses: actions/upload-artifact@v4
-      with:
-        name: DaedalusX64-PSP
-        path: DaedalusX64
-
-    - name: Extract tag name
-      if: startsWith(github.ref, 'refs/tags/')
-      id: tag
-      run: echo "{name}={VERSION::${GITHUB_REF/refs\/tags\//}}" >> $GITHUB_OUTPUT
-
-
-  build-linux-amd64:
-    runs-on: ubuntu-24.04
-    steps:
-    - uses: actions/checkout@v4
-
-    - name: Install dependencies
-      run: |
-        sudo apt update
-        sudo apt install build-essential git bash cmake libpng-dev libz-dev libminizip-dev libsdl2-dev libsdl2-ttf-dev libglew-dev libglm-dev
-    
-    - name: Compile project
-      run: |
-        ./build_daedalus.sh
-
-    - name: Get short SHA
-      id: slug
-      run: echo "{name}={sha8::$(echo ${GITHUB_SHA} | cut -c1-8)}" >> $GITHUB_OUTPUT
-
-    - name: Prepare artifacts
-      run: |
-        tar -zcvf daedalusX64-linux-amd64.tar.gz DaedalusX64
-
-
-    - name: Upload artifacts
-      if: ${{ success() }}
-      uses: actions/upload-artifact@v4
-      with:
-        name: DaedalusX64-Linux-amd64
-        path: DaedalusX64
-
-  build-linux-arm64:
-    runs-on: ubuntu-24.04-arm
-    steps:
-    - uses: actions/checkout@v4
-
-    - name: Install dependencies
-      run: |
-        sudo apt update
-        sudo apt install build-essential git bash cmake libpng-dev libz-dev libminizip-dev libsdl2-dev libsdl2-ttf-dev libglew-dev libfmt-dev libglm-dev
-    
-    - name: Compile project
-      run: |
-        ./build_daedalus.sh
-
-    - name: Get short SHA
-      id: slug
-      run: echo "{name}={sha8::$(echo ${GITHUB_SHA} | cut -c1-8)}" >> $GITHUB_OUTPUT
-
-    - name: Prepare artifacts
-      run: |
-        tar -zcvf daedalusX64-linux-arm64.tar.gz DaedalusX64
-
-    - name: Upload artifacts
-      if: ${{ success() }}
-      uses: actions/upload-artifact@v4
-      with:
-        name: DaedalusX64-Linux-arm64
-        path: DaedalusX64
-
-
-  build-ctr:
-    runs-on: ubuntu-24.04-arm
-    container: wally4000/daedalusx64:latest
 
     steps:
-      - uses: actions/checkout@v4 
+      # 1. Scarica il codice sorgente
+      - name: 📥 Checkout sorgente
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
-      - name: Compile project
-        run: | 
-          ./build_daedalus.sh CTR
+      # 2. Installa la toolchain PSPDEV (compilatore per PSP)
+      - name: 🔧 Setup PSPDEV toolchain
+        uses: pspdev/setup-pspdev@v1
 
-      - name: Get short SHA
-        id: slug
-        run: echo "{name}={sha8::$(echo ${GITHUB_SHA} | cut -c1-8)}" >> $GITHUB_OUTPUT
-
-      - name: Prepare artifacts
+      # 3. Installa dipendenze di sistema
+      - name: 📦 Installa dipendenze
         run: |
-          tar -zcvf daedalusX64-CTR.tar.gz DaedalusX64\
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake \
+            ninja-build \
+            python3 \
+            git
 
-      - name: Upload artifacts
-        if: ${{ success() }}
+      # 4. Configura il progetto con CMake per PSP
+      - name: ⚙️ Configura CMake per PSP
+        run: |
+          mkdir -p build_psp
+          cd build_psp
+          cmake .. \
+            -DCMAKE_TOOLCHAIN_FILE=$PSPDEV/psp/share/pspdev.cmake \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DTARGET_PSP=ON \
+            -G Ninja
+
+      # 5. Compila!
+      - name: 🔨 Compila
+        run: |
+          cd build_psp
+          ninja -j$(nproc)
+
+      # 6. Prepara il pacchetto finale (.pbp per PSP)
+      - name: 📦 Pacchetta EBOOT.PBP
+        run: |
+          mkdir -p artifact
+          # Copia l'eseguibile finale
+          find build_psp -name "EBOOT.PBP" -exec cp {} artifact/ \;
+          find build_psp -name "*.prx" -exec cp {} artifact/ \; || true
+          # Copia le risorse necessarie
+          cp -r Data artifact/ 2>/dev/null || true
+          echo "=== Contenuto artifact ==="
+          ls -lah artifact/
+
+      # 7. Carica la build come artifact scaricabile
+      - name: ⬆️ Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: DaedalusX64-CTR
-          path: DaedalusX64
+          name: DaedalusX64-PSP-${{ github.sha }}
+          path: artifact/
+          retention-days: 30
 
-  build-macos:
-    runs-on: macOS-latest
-    steps:
-    - uses: actions/checkout@v4
-
-    - name: Setup Homebrew # This will install the correct homebrew for architecture selected
-      run: |
-        /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-    - name: Install dependencies
-      run: |
-        brew install git bash cmake libpng minizip sdl2 sdl2_ttf glew glm
-    
-    - name: Compile project
-      run: |
-        ./build_daedalus.sh
-
-    - name: Get short SHA
-      id: slug
-      run: echo "{name}={sha8::$(echo ${GITHUB_SHA} | cut -c1-8)}" >> $GITHUB_OUTPUT
-
-    - name: Prepare artifacts
-      run: |
-          tar -zcvf daedalusX64-macos-x86.tar.gz DaedalusX64
-
-    - name: Upload artifacts
-      if: ${{ success() }}
-      uses: actions/upload-artifact@v4
-      with:
-        name: DaedalusX64-macos
-        path: DaedalusX64
-
-  build-windows:
-    runs-on: windows-latest
-    env:
-      VCPKG_DEFAULT_TRIPLET: x64-windows
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install packages
-        run: | 
-          vcpkg install 
-          
-      - name: Run CMake config
-        run: |
-          cmake -S . -B build "-DX_VCPKG_APPLOCAL_DEPS_INSTALL=1 -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake" "-DVCPKG_TARGET_TRIPLET=x64-windows"
-
-      - name: Build
-        run: |
-          cmake --build build --config Release
-          cmake --install build --prefix DaedalusX64
-
-      - name: Upload artifacts
-        if: ${{ success() }}
-        uses: actions/upload-artifact@v4
+      # 8. Se è un push su master, crea anche una Release automatica
+      - name: 🚀 Crea Release automatica
+        if: github.ref == 'refs/heads/master' && github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
         with:
-          name: DaedalusX64-Win
-          path: DaedalusX64
+          tag_name: build-${{ github.run_number }}
+          name: "Build #${{ github.run_number }}"
+          body: |
+            ## 🎮 DaedalusX64 PSP - Build Automatica
+
+            **Commit:** ${{ github.sha }}
+            **Data:** ${{ github.event.head_commit.timestamp }}
+
+            ### Come installare:
+            1. Copia `EBOOT.PBP` in `PSP/GAME/DaedalusX64/`
+            2. Copia la cartella `Data/` nella stessa directory
+            3. Avvia dalla XMB della PSP
+
+            ### Cambiamenti:
+            ${{ github.event.head_commit.message }}
+          files: artifact/*
+          draft: false
+          prerelease: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
