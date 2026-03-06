@@ -33,12 +33,11 @@ jobs:
           git submodule sync 2>/dev/null || true
           git submodule update --init --depth=1 2>/dev/null || true
 
-      - name: 🩹 Applica tutte le patch PSP
+      - name: 🩹 Applica patch PSP
         run: |
           python3 << 'PYEOF'
           import os, re, subprocess
 
-          # Legge file ignorando encoding non-UTF8
           def read(f):
               with open(f, encoding='utf-8', errors='ignore') as fp:
                   return fp.read()
@@ -46,48 +45,51 @@ jobs:
               with open(f, 'w', encoding='utf-8') as fp:
                   fp.write(c)
 
-          # ─── Patch 1: PSP_LARGE_MEMORY (64MB) ────────────────────────
-          # Il main PSP ha: PSP_MODULE_INFO( DaedalusX64 1.1.9a, 0, 1, 1 )
-          # L'attr 0 deve diventare 0x1000 per abilitare i 64MB
-          files = subprocess.getoutput("grep -rl 'PSP_MODULE_INFO' Source/").splitlines()
-          for f in files:
-              c = read(f)
-              # Regex più permissiva: il nome può avere spazi, numeri, punti
-              c2 = re.sub(
-                  r'(PSP_MODULE_INFO\s*\(\s*[^,]+,\s*)(0x[0-9a-fA-F]+|0)(\s*,)',
-                  lambda m: m.group(1) + hex(int(m.group(2), 16) | 0x1000) + m.group(3),
+          main_psp = 'Source/SysPSP/main.cpp'
+          if not os.path.exists(main_psp):
+              print("❌ main.cpp PSP non trovato!")
+              exit(1)
+
+          c = read(main_psp)
+          original = c
+
+          # ─── Patch 1: RIPRISTINA PSP_MODULE_INFO a user mode (0x0) ───
+          # 0x1000 = kernel mode → CRASH su ARK/PRO/LME
+          # 0x0    = user mode → CORRETTO
+          c = re.sub(
+              r'(PSP_MODULE_INFO\s*\([^,]+,\s*)0x1000(\s*,)',
+              r'\g<1>0x0\2',
+              c
+          )
+          # Per sicurezza, assicura che sia 0 e non altro valore strano  
+          match = re.search(r'PSP_MODULE_INFO[^\n]+', c)
+          print(f"PSP_MODULE_INFO: {match.group() if match else 'non trovato'}")
+
+          # ─── Patch 2: Heap massimo per 64MB ──────────────────────────
+          # PSP_HEAP_SIZE_MAX() dice al kernel di dare TUTTA la RAM disponibile
+          # È diverso da PSP_MODULE_INFO e funziona in user mode
+          if 'PSP_HEAP_SIZE_MAX' not in c and 'PSP_HEAP_SIZE_KB' not in c:
+              # Aggiunge dopo PSP_MODULE_INFO
+              c = re.sub(
+                  r'(PSP_MODULE_INFO[^\n]+\n)',
+                  r'\1PSP_HEAP_SIZE_MAX();\n',
                   c
               )
-              if c2 != c:
-                  write(f, c2)
-                  print(f"✅ LARGE_MEMORY patch → {f}")
-              else:
-                  match = re.search(r'PSP_MODULE_INFO[^\n]+', c)
-                  print(f"ℹ️  Già ok: {match.group() if match else f}")
+              print("✅ PSP_HEAP_SIZE_MAX aggiunto")
+          else:
+              # Sostituisce heap fisso con massimo
+              c = re.sub(r'PSP_HEAP_SIZE_KB\(\d+\)', 'PSP_HEAP_SIZE_MAX()', c)
+              print("ℹ️  Heap già configurato, aggiornato a MAX")
 
-          # ─── Patch 2: VFPU sul main thread ───────────────────────────
-          files2 = subprocess.getoutput("grep -rl 'PSP_MAIN_THREAD' Source/").splitlines()
-          for f in files2:
-              c = read(f)
-              c2 = c.replace(
-                  'PSP_MAIN_THREAD_ATTR(0)',
-                  'PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER | THREAD_ATTR_VFPU)'
-              ).replace(
-                  'PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER)',
-                  'PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER | THREAD_ATTR_VFPU)'
-              )
-              if c2 != c:
-                  write(f, c2)
-                  print(f"✅ VFPU patch → {f}")
+          # ─── Patch 3: Overclock 333MHz ────────────────────────────────
+          c = re.sub(r'scePowerSetClockFrequency\(\s*\d+', 'scePowerSetClockFrequency(333', c)
+          c = re.sub(r'scePowerSetBusClockFrequency\(\s*\d+', 'scePowerSetBusClockFrequency(166', c)
+          print("✅ Overclock 333MHz")
 
-          # ─── Patch 3: Home button + Exit callback ─────────────────────
-          main_psp = 'Source/SysPSP/main.cpp'
-          if os.path.exists(main_psp):
-              c = read(main_psp)
-              if 'registerExitCallback' not in c and '_psp_exit_cb' not in c:
-                  home_code = '''
-          // ── PSP Home Button (auto-patch) ────────────────────────────
-          #ifdef __PSP__
+          # ─── Patch 4: Home button ─────────────────────────────────────
+          if 'PSP_SetupCallbacks' not in c:
+              home_code = '''
+          // ── PSP Home Button (auto-patch) ────────────────
           #include <pspkernel.h>
           static int _psp_exit_cb(int, int, void*) { sceKernelExitGame(); return 0; }
           static int _psp_cb_thread(SceSize, void*) {
@@ -97,58 +99,43 @@ jobs:
               return 0;
           }
           static void PSP_SetupCallbacks() {
-              int t = sceKernelCreateThread("cb_thread", _psp_cb_thread, 0x11, 0xFA0, PSP_THREAD_ATTR_USER, 0);
+              int t = sceKernelCreateThread("cb_thread", _psp_cb_thread,
+                                            0x11, 0xFA0, PSP_THREAD_ATTR_USER, 0);
               if (t >= 0) sceKernelStartThread(t, 0, 0);
           }
-          #else
-          static void PSP_SetupCallbacks() {}
-          #endif
-          // ── Fine Home Button patch ───────────────────────────────────
+          // ── Fine Home Button ─────────────────────────────
           '''
-                  # Inserisce dopo il primo blocco di include
-                  c2 = re.sub(r'((?:#include[^\n]*\n)+)', r'\1' + home_code, c, count=1)
-                  # Chiama all'inizio del main()
-                  c2 = re.sub(
-                      r'(int\s+main\s*\([^)]*\)\s*\{)',
-                      r'\1\n    PSP_SetupCallbacks();',
-                      c2
-                  )
-                  write(main_psp, c2)
-                  print(f"✅ Home button patch → {main_psp}")
-              else:
-                  print(f"ℹ️  Home button già presente in {main_psp}")
+              c = re.sub(r'((?:#include[^\n]*\n)+)', r'\1' + home_code, c, count=1)
+              c = re.sub(
+                  r'(int\s+main\s*\([^)]*\)\s*\{)',
+                  r'\1\n    PSP_SetupCallbacks();',
+                  c
+              )
+              print("✅ Home button patch")
 
-          # ─── Patch 4: Overclock 333MHz ────────────────────────────────
-          result = subprocess.getoutput("grep -rl 'scePowerSetClockFrequency' Source/")
-          for f in result.splitlines():
-              c = read(f)
-              c2 = c
-              c2 = re.sub(r'scePowerSetClockFrequency\(\s*\d+', 'scePowerSetClockFrequency(333', c2)
-              c2 = re.sub(r'scePowerSetBusClockFrequency\(\s*\d+', 'scePowerSetBusClockFrequency(166', c2)
-              if c2 != c:
-                  write(f, c2)
-                  print(f"✅ Overclock 333MHz patch → {f}")
+          # ─── Patch 5: VFPU per il thread principale ───────────────────
+          c = c.replace(
+              'PSP_MAIN_THREAD_ATTR(0)',
+              'PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER | THREAD_ATTR_VFPU)'
+          ).replace(
+              'PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER)',
+              'PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER | THREAD_ATTR_VFPU)'
+          )
 
-          # ─── Patch 5: Stack size 4MB ──────────────────────────────────
-          result2 = subprocess.getoutput("grep -rl 'PSP_MAIN_THREAD_STACK_SIZE_KB' Source/")
-          for f in result2.splitlines():
-              c = read(f)
-              c2 = re.sub(r'PSP_MAIN_THREAD_STACK_SIZE_KB\(\d+\)', 'PSP_MAIN_THREAD_STACK_SIZE_KB(4096)', c)
-              if c2 != c:
-                  write(f, c2)
-                  print(f"✅ Stack 4MB patch → {f}")
+          write(main_psp, c)
 
           # ─── Verifica finale ──────────────────────────────────────────
           print("\n=== VERIFICA PATCH ===")
-          main_content = read('Source/SysPSP/main.cpp')
-          mi = re.search(r'PSP_MODULE_INFO[^\n]+', main_content)
-          print(f"PSP_MODULE_INFO: {mi.group() if mi else 'NON TROVATO'}")
-          print(f"Home button: {'✅ presente' if 'registerExitCallback' in main_content else '❌ mancante'}")
-          print(f"SetupCallbacks: {'✅ presente' if 'PSP_SetupCallbacks' in main_content else '❌ mancante'}")
-          
-          clock_content = subprocess.getoutput("grep -r 'scePowerSetClockFrequency' Source/")
-          print(f"Clock: {clock_content[:200] if clock_content else 'non trovato'}")
-          print("\n✅ Patch completate!")
+          c_final = read(main_psp)
+          mi = re.search(r'PSP_MODULE_INFO[^\n]+', c_final)
+          heap = re.search(r'PSP_HEAP[^\n]+', c_final)
+          clock = re.search(r'scePowerSetClockFrequency[^\n]+', c_final)
+          print(f"MODULE_INFO : {mi.group() if mi else '❌'}")
+          print(f"HEAP        : {heap.group() if heap else '❌'}")
+          print(f"CLOCK       : {clock.group() if clock else '❌'}")
+          print(f"HOME BTN    : {'✅' if 'registerExitCallback' in c_final else '❌'}")
+          print(f"VFPU        : {'✅' if 'THREAD_ATTR_VFPU' in c_final else '❌'}")
+          print("\n✅ Done!")
           PYEOF
 
       - name: 🔧 Installa PSPDEV toolchain
@@ -171,7 +158,6 @@ jobs:
         run: |
           TOOLCHAIN=$(find $PSPDEV -name "pspdev.cmake" 2>/dev/null | head -1)
           [ -z "$TOOLCHAIN" ] && TOOLCHAIN=$(find $PSPDEV -name "*.cmake" | head -1)
-          echo "Toolchain: $TOOLCHAIN"
 
           mkdir -p build_psp
           cd build_psp
@@ -181,8 +167,8 @@ jobs:
             -DTARGET_PSP=ON \
             -DPSP_LARGE_MEMORY=ON \
             -G Ninja \
-            -DCMAKE_C_FLAGS="-O2 -G0 -DPSP_SLIM -DPSP_FW_VERSION=660" \
-            -DCMAKE_CXX_FLAGS="-O2 -G0 -DPSP_SLIM -DPSP_FW_VERSION=660"
+            -DCMAKE_C_FLAGS="-O2 -G0" \
+            -DCMAKE_CXX_FLAGS="-O2 -G0"
 
       - name: 🔨 Compila
         run: |
@@ -210,20 +196,13 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}
-          name: "Build #${{ github.run_number }} — tutte le patch"
+          name: "Build #${{ github.run_number }}"
           body: |
             ## 🎮 DaedalusX64 PSP — Build #${{ github.run_number }}
-            - ✅ 64MB RAM (PSP_LARGE_MEMORY)
-            - ✅ CPU 333MHz overclock
+            - ✅ 64MB RAM (PSP_HEAP_SIZE_MAX, user mode)
+            - ✅ CPU 333MHz
             - ✅ VFPU abilitato
-            - ✅ Home button fix
-            - ✅ Stack 4MB
-
-            ### Installazione:
-            1. `EBOOT.PBP` → `PSP/GAME/DaedalusX64/`
-            2. `Data/` → stessa cartella
-            3. ROM in `Data/Roms/`
-
+            - ✅ Home button
             **Commit:** ${{ github.sha }}
           files: artifact/*
           draft: false
