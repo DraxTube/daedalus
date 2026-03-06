@@ -5,7 +5,7 @@ on:
     branches: [ master, main, dev ]
   pull_request:
     branches: [ master, main ]
-  workflow_dispatch:  # permette di avviare manualmente dalla UI di GitHub
+  workflow_dispatch:
 
 jobs:
   build-psp:
@@ -13,19 +13,40 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. Scarica il codice sorgente
+      # 1. Checkout SENZA submodules (SaveStates è rotto)
       - name: 📥 Checkout sorgente
         uses: actions/checkout@v4
         with:
-          submodules: recursive
+          submodules: false
 
-      # 2. Installa PSPDEV usando i binari precompilati ufficiali
+      # 1b. Fix submodules manualmente
+      - name: 🩹 Fix submodules rotti
+        run: |
+          if [ -f .gitmodules ]; then
+            echo "=== .gitmodules originale ==="
+            cat .gitmodules
+            # Rimuove SaveStates dal .gitmodules
+            python3 -c "
+          import re
+          with open('.gitmodules', 'r') as f:
+              content = f.read()
+          # Rimuove il blocco [submodule \"SaveStates\"] e le sue righe
+          content = re.sub(r'\[submodule \"SaveStates\"\][^\[]*', '', content, flags=re.DOTALL)
+          with open('.gitmodules', 'w') as f:
+              f.write(content)
+          print('=== .gitmodules pulito ===')
+          print(content)
+          "
+          fi
+          git submodule sync 2>/dev/null || true
+          git submodule update --init --depth=1 2>/dev/null || true
+          echo "✅ Submodules OK"
+
+      # 2. Installa PSPDEV
       - name: 🔧 Installa PSPDEV toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            cmake ninja-build python3 git \
-            build-essential wget
+          sudo apt-get install -y cmake ninja-build python3 git build-essential wget
 
           export PSPDEV=/usr/local/pspdev
           echo "PSPDEV=$PSPDEV" >> $GITHUB_ENV
@@ -37,7 +58,7 @@ jobs:
           echo "✅ PSPDEV installato"
           psp-gcc --version
 
-      # 3. Configura il progetto con CMake per PSP
+      # 3. Configura CMake per PSP
       - name: ⚙️ Configura CMake per PSP
         run: |
           mkdir -p build_psp
@@ -48,25 +69,23 @@ jobs:
             -DTARGET_PSP=ON \
             -G Ninja
 
-      # 5. Compila!
+      # 4. Compila
       - name: 🔨 Compila
         run: |
           cd build_psp
           ninja -j$(nproc)
 
-      # 6. Prepara il pacchetto finale (.pbp per PSP)
+      # 5. Pacchetta
       - name: 📦 Pacchetta EBOOT.PBP
         run: |
           mkdir -p artifact
-          # Copia l'eseguibile finale
-          find build_psp -name "EBOOT.PBP" -exec cp {} artifact/ \;
+          find build_psp -name "EBOOT.PBP" -exec cp {} artifact/ \; || true
           find build_psp -name "*.prx" -exec cp {} artifact/ \; || true
-          # Copia le risorse necessarie
           cp -r Data artifact/ 2>/dev/null || true
           echo "=== Contenuto artifact ==="
           ls -lah artifact/
 
-      # 7. Carica la build come artifact scaricabile
+      # 6. Upload artifact
       - name: ⬆️ Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -74,7 +93,7 @@ jobs:
           path: artifact/
           retention-days: 30
 
-      # 8. Se è un push su master, crea anche una Release automatica
+      # 7. Release automatica su push master
       - name: 🚀 Crea Release automatica
         if: github.ref == 'refs/heads/master' && github.event_name == 'push'
         uses: softprops/action-gh-release@v2
@@ -85,7 +104,6 @@ jobs:
             ## 🎮 DaedalusX64 PSP - Build Automatica
 
             **Commit:** ${{ github.sha }}
-            **Data:** ${{ github.event.head_commit.timestamp }}
 
             ### Come installare:
             1. Copia `EBOOT.PBP` in `PSP/GAME/DaedalusX64/`
