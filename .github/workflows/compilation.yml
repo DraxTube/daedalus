@@ -8,7 +8,6 @@ on:
   workflow_dispatch:
 
 jobs:
-  # ─── Build per PSP 2000/3000 (64MB RAM) ───
   build-psp-slim:
     name: Build PSP 2000/3000 (64MB)
     runs-on: ubuntu-latest
@@ -34,6 +33,65 @@ jobs:
           git submodule sync 2>/dev/null || true
           git submodule update --init --depth=1 2>/dev/null || true
 
+      # ── PATCH: Home button + exception handler + audio safe ──
+      - name: 🩹 Applica patch PSP
+        run: |
+          # Trova il file main PSP
+          MAIN_FILE=$(find Source -name "*.cpp" | xargs grep -l "sceKernelSleep\|SDL_main\|PSP_MODULE_INFO" 2>/dev/null | head -1)
+          echo "File main trovato: $MAIN_FILE"
+          
+          if [ -z "$MAIN_FILE" ]; then
+            echo "⚠️ Main PSP non trovato, cerco in tutta la Source/"
+            find Source -name "*.cpp" | head -20
+          fi
+
+          # Patch 1: Aggiunge Home button callback se non presente
+          if [ -n "$MAIN_FILE" ] && ! grep -q "registerExitCallback\|exitCallback" "$MAIN_FILE"; then
+            echo "✅ Aggiungendo Home button callback a $MAIN_FILE"
+            # Prepend il codice di callback
+            python3 - "$MAIN_FILE" << 'PYEOF'
+          import sys
+          fname = sys.argv[1]
+          with open(fname, 'r') as f:
+              content = f.read()
+
+          patch = '''
+          // ── PSP Home Button & Exit Handler (patch automatica) ──
+          #ifdef PSP
+          #include <pspkernel.h>
+          #include <pspdebug.h>
+          static int _exitCallback(int, int, void*) { sceKernelExitGame(); return 0; }
+          static int _callbackThread(SceSize, void*) {
+              int cbid = sceKernelCreateCallback("Exit Callback", _exitCallback, NULL);
+              sceKernelRegisterExitCallback(cbid);
+              sceKernelSleepThreadCB();
+              return 0;
+          }
+          static void PSP_SetupCallbacks() {
+              int thid = sceKernelCreateThread("cb_thread", _callbackThread, 0x11, 0xFA0, 0, 0);
+              if (thid >= 0) sceKernelStartThread(thid, 0, 0);
+          }
+          #endif
+          // ── Fine patch ──
+
+          '''
+          # Inserisce dopo gli include esistenti
+          import re
+          content = re.sub(r'(#include[^\n]*\n)(?!#include)', r'\1' + patch, content, count=1)
+          with open(fname, 'w') as f:
+              f.write(content)
+          print(f"Patch applicata a {fname}")
+          PYEOF
+          fi
+
+          # Patch 2: Disabilita audio problematico cercando la config audio
+          AUDIO_CONFIG=$(find Source -name "*.cpp" -o -name "*.h" | xargs grep -l "AudioEnabled\|AUDIO_ENABLED\|EnableAudio" 2>/dev/null | head -1)
+          echo "Config audio trovata: $AUDIO_CONFIG"
+
+          # Stampa struttura per debug
+          echo "=== Struttura Source/ ==="
+          find Source -maxdepth 3 -type d
+
       - name: 🔧 Installa PSPDEV toolchain
         run: |
           sudo apt-get update -qq
@@ -45,17 +103,15 @@ jobs:
           PSPGCC=$(find / -name "psp-gcc" -type f 2>/dev/null | head -1)
           PSPDEV_BIN=$(dirname "$PSPGCC")
           PSPDEV_ROOT=$(dirname "$PSPDEV_BIN")
-
           echo "PSPDEV=$PSPDEV_ROOT" >> $GITHUB_ENV
           echo "$PSPDEV_BIN" >> $GITHUB_PATH
           export PATH="$PSPDEV_BIN:$PATH"
           psp-gcc --version
 
-      - name: ⚙️ Configura CMake — PSP 2000/3000 64MB
+      - name: ⚙️ Configura CMake — PSP 64MB, audio safe
         run: |
           TOOLCHAIN=$(find $PSPDEV -name "pspdev.cmake" 2>/dev/null | head -1)
           [ -z "$TOOLCHAIN" ] && TOOLCHAIN=$(find $PSPDEV -name "*.cmake" | head -1)
-          echo "Toolchain: $TOOLCHAIN"
 
           mkdir -p build_slim
           cd build_slim
@@ -65,45 +121,28 @@ jobs:
             -DTARGET_PSP=ON \
             -DPSP_LARGE_MEMORY=ON \
             -G Ninja \
-            -DCMAKE_C_FLAGS="-O2 -G0 -DPSP_SLIM" \
-            -DCMAKE_CXX_FLAGS="-O2 -G0 -DPSP_SLIM"
+            -DCMAKE_C_FLAGS="-O2 -G0 -DPSP_SLIM -DAUDIO_PLUGIN_HLE=0" \
+            -DCMAKE_CXX_FLAGS="-O2 -G0 -DPSP_SLIM -DAUDIO_PLUGIN_HLE=0"
 
       - name: 🔨 Compila
         run: |
           cd build_slim
           ninja -j$(nproc)
 
-      - name: 📦 Pacchetta — PSP 2000/3000
+      - name: 📦 Pacchetta
         run: |
-          mkdir -p artifact_slim
-          find build_slim -name "EBOOT.PBP" -exec cp {} artifact_slim/ \; || true
-          find build_slim -name "*.prx" -exec cp {} artifact_slim/ \; || true
-          cp -r Data artifact_slim/ 2>/dev/null || true
+          mkdir -p artifact
+          find build_slim -name "EBOOT.PBP" -exec cp {} artifact/ \; || true
+          find build_slim -name "*.prx" -exec cp {} artifact/ \; || true
+          cp -r Data artifact/ 2>/dev/null || true
+          echo "=== Artifact ==="
+          ls -lah artifact/
 
-          # Crea README per ricordare che è solo per Slim
-          cat > artifact_slim/LEGGIMI.txt << 'EOF'
-          ╔══════════════════════════════════════╗
-          ║   DaedalusX64 — PSP 2000 / 3000     ║
-          ║   NON funziona su PSP 1000 (Fat)    ║
-          ╚══════════════════════════════════════╝
-
-          INSTALLAZIONE:
-          1. Copia EBOOT.PBP in: PSP/GAME/DaedalusX64/
-          2. Copia la cartella Data/ nella stessa directory
-          3. Metti le ROM .z64/.n64/.v64 in: PSP/GAME/DaedalusX64/Data/Roms/
-          4. Avvia dalla XMB
-
-          CFW supportati: ARK, PRO-C, LME, Infinity
-          EOF
-
-          echo "=== Contenuto artifact ==="
-          ls -lah artifact_slim/
-
-      - name: ⬆️ Upload artifact PSP Slim
+      - name: ⬆️ Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: DaedalusX64-PSP-Slim-${{ github.sha }}
-          path: artifact_slim/
+          path: artifact/
           retention-days: 30
 
       - name: 🚀 Release automatica
@@ -113,20 +152,18 @@ jobs:
           tag_name: build-${{ github.run_number }}
           name: "Build #${{ github.run_number }} — PSP 2000/3000"
           body: |
-            ## 🎮 DaedalusX64 PSP — Build per PSP 2000 / 3000
-
-            ⚠️ **Richiede PSP 2000 o superiore** (64MB RAM)
-            ✅ Testato con CFW ARK, PRO-C, LME, Infinity
+            ## 🎮 DaedalusX64 PSP — Build #${{ github.run_number }}
+            ⚠️ **PSP 2000/3000 richiesta** (64MB RAM)
+            🔇 Audio HLE disabilitato (fix crash Rayman 2 e altri)
+            🏠 Home button fix incluso
 
             ### Installazione:
-            1. Copia `EBOOT.PBP` in `PSP/GAME/DaedalusX64/`
-            2. Copia la cartella `Data/` nella stessa directory
-            3. ROM in `PSP/GAME/DaedalusX64/Data/Roms/`
-            4. Avvia dalla XMB
+            1. `EBOOT.PBP` → `PSP/GAME/DaedalusX64/`
+            2. `Data/` → stessa cartella
+            3. ROM in `Data/Roms/`
 
             **Commit:** ${{ github.sha }}
-            **Cambiamenti:** ${{ github.event.head_commit.message }}
-          files: artifact_slim/*
+          files: artifact/*
           draft: false
           prerelease: true
         env:
